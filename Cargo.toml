@@ -2,6 +2,8 @@
 name = "simple-mcts"
 version = "0.1.0"
 edition = "2021"
+description = "A Rust library providing a straightforward and configurable implementation of the Monte Carlo Tree Search (MCTS) algorithm. It's designed for easy integration into various game AI projects, supporting both single-instance and batch-processing MCTS simulations."
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 rand="0.9.1"
