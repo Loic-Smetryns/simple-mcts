@@ -1,11 +1,11 @@
 //! Tree data structure implementation for MCTS
 
-use std::{cell::RefCell, rc::{Rc, Weak}};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Strong reference to a tree node
-pub type NodeRef<T, const N: usize> = Rc<RefCell<Node<T, N>>>;
+pub type NodeRef<T, const N: usize> = Arc<Mutex<Node<T, N>>>;
 /// Weak reference to a tree node (to break reference cycles)
-pub type WeakNodeRef<T, const N: usize> = Weak<RefCell<Node<T, N>>>;
+pub type WeakNodeRef<T, const N: usize> = Weak<Mutex<Node<T, N>>>;
 
 /// A node in the tree structure
 ///
@@ -36,7 +36,7 @@ impl<T, const N: usize> Node<T, N>{
     /// - `data`: The data to store in the root node
     #[inline]
     pub fn new_root(data: T) -> NodeRef<T, N>{
-        Rc::new(RefCell::new(Node{ parent: None, children: std::array::from_fn(|_| None), data: data }))
+        Arc::new(Mutex::new(Node{ parent: None, children: std::array::from_fn(|_| None), data: data }))
     }
 
     /// Checks if this node is the root (has no parent)
@@ -82,11 +82,11 @@ impl<T, const N: usize> Node<T, N>{
     /// Reference to the newly created child node
     #[inline]
     pub fn add_child(node: &NodeRef<T, N>, i: usize, data: T) -> NodeRef<T, N>{
-        let ref_node = Rc::new(
-            RefCell::new(Node::<T, N>::new(Some(Rc::downgrade(node)), data))
+        let ref_node = Arc::new(
+            Mutex::new(Node::<T, N>::new(Some(Arc::downgrade(node)), data))
         );
 
-        node.borrow_mut().children[i] = Some(Rc::clone(&ref_node));
+        node.lock().unwrap().children[i] = Some(Arc::clone(&ref_node));
         ref_node
     }
 
@@ -97,7 +97,7 @@ impl<T, const N: usize> Node<T, N>{
     /// - `i`: The index of the child to remove
     #[inline]
     pub fn remove_child(node: &NodeRef<T, N>, i: usize){
-        node.borrow_mut().children[i] = None;
+        node.lock().unwrap().children[i] = None;
     }
 
     /// Gets a reference to the node's data
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn test_root_1() {
         let root = Node::<u32, 4>::new_root(5);
-        let node = & *root.borrow();
+        let node = & *root.lock().unwrap();
 
         assert_eq!(*node.get(), 5);
 
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn test_root_2() {
         let root = Node::<u32, 3>::new_root(2);
-        let node = & *root.borrow();
+        let node = & *root.lock().unwrap();
 
         assert_eq!(*node.get(), 2);
 
@@ -156,7 +156,7 @@ mod tests {
         Node::add_child(&root, 1, 2);
         Node::add_child(&root, 3, 8);
 
-        let root_node = &*root.borrow();
+        let root_node = &*root.lock().unwrap();
 
         assert_eq!(*root_node.get(), 6);
         assert!(root_node.get_child(0).is_some());
@@ -168,9 +168,9 @@ mod tests {
         let ptr_node_1 = root_node.get_child(1).unwrap();
         let ptr_node_3 = root_node.get_child(3).unwrap();
 
-        let node_0 = &*ptr_node_0.borrow();
-        let node_1 = &*ptr_node_1.borrow();
-        let node_3 = &*ptr_node_3.borrow();
+        let node_0 = &*ptr_node_0.lock().unwrap();
+        let node_1 = &*ptr_node_1.lock().unwrap();
+        let node_3 = &*ptr_node_3.lock().unwrap();
 
         assert_eq!(*node_0.get(), 1);
         assert_eq!(*node_1.get(), 2);
@@ -187,7 +187,7 @@ mod tests {
 
         Node::remove_child(&root, 3);
 
-        let root_node = &*root.borrow();
+        let root_node = &*root.lock().unwrap();
 
         assert_eq!(*root_node.get(), 6);
         assert!(root_node.get_child(0).is_some());

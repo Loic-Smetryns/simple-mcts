@@ -2,7 +2,7 @@
 //!
 //! Provides parallel simulation capabilities for multiple MCTS instances
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{sync::atomic::{AtomicU8, Ordering}, time::{SystemTime, UNIX_EPOCH}};
 
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -97,7 +97,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
                     (SystemTime::now().duration_since(UNIX_EPOCH).expect("").as_nanos()%u64::MAX as u128) as u64 
                 }
             ),
-            state: MctsState::Usable,
+            state: MctsState(AtomicU8::new(MctsState::USABLE)),
             config: MctsConfig { exploration_coef: config.exploration_coef, selection_function: config.selection_function }
         }
     }
@@ -152,7 +152,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     /// fn main() -> Result<(), MctsError> {
     ///     let manager = MctsBatch::<GameTest, 4>::new();
     ///     // A newly created MctsBatch is typically in the Usable state.
-    ///     assert_eq!(manager.get_state(), MctsState::Usable);
+    ///     assert_eq!(manager.get_state(), MctsState::USABLE);
     ///     
     ///     // The state would change, for example, after calling `start_iteration`
     ///     // (if MctsBatch had such a method that changed its state to AwaitingSimulation)
@@ -161,8 +161,8 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     /// }
     /// ```
     #[inline]
-    pub fn get_state(&self) -> MctsState{
-        self.state.clone()
+    pub fn get_state(&self) -> u8{
+        self.state.0.load(Ordering::SeqCst)
     }
 
     /// Populates the batch with new MCTS instances.
@@ -176,8 +176,9 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     /// `Ok(())` if the batch is successfully populated.
     /// `Err(MctsError::InvalidState(_))` if the batch processor is not in the `Usable` state.
     pub fn populate(&mut self, mut n: usize) -> Result<(), MctsError>{
-        if self.state != MctsState::Usable {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
 
         let mut empty_place: usize = self.instances.len() - self.get_count();
@@ -199,6 +200,8 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
         for _ in 0..n{
             self.instances.push(Some((Mcts::<T, N>::from_config(&self.config), Vec::new())));
         }
+
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(())
     }
 
@@ -213,8 +216,9 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     /// - `Ok(())` if the batch is successfully populated.
     /// - `Err(MctsError::InvalidState(_))` if the batch is not in the `Usable` state.
     pub fn populate_from_game(&mut self, mut games: Vec<T>) -> Result<(), MctsError>{
-        if self.state != MctsState::Usable {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
 
         let mut n: usize = games.len();
@@ -238,6 +242,8 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
         for _ in 0..n{
             self.instances.push(Some((Mcts::<T, N>::from_game(games.pop().unwrap()), Vec::new())));
         }
+
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(())
     }
 
@@ -249,12 +255,15 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     /// - `Ok(())` if the batch is successfully cleared.
     /// - `Err(MctsError::InvalidState(_))` if the batch is not in the `Usable` state.
     pub fn clear(&mut self) -> Result<(), MctsError>{
-        if self.state != MctsState::Usable {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
 
         self.instances.clear();
         self.count = 0;
+
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(())
     }
 
@@ -275,11 +284,10 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     ///     - `MctsError::InvalidAction`
     ///     - `MctsError::UnexploredAction`
     pub fn iterate(&mut self, evaluator: &dyn GameEvaluator<T, N>) -> Result<(), MctsError>{
-        if self.state != MctsState::Usable {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
-
-        self.state = MctsState::Locked;
 
         for opt in &mut self.instances{
             if let Some((mcts, _history)) = opt{
@@ -288,9 +296,8 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
                 }
             }
         }
-
-        self.state = MctsState::Usable;
-
+        
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(())
     }
 
@@ -304,11 +311,10 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     /// `Err(MctsError::InvalidState(_))` if the batch processor is not in the `Usable` state.
     /// `Err(MctsError::SearchAlreadyOver)` if an MCTS instance's root node indicates the game is already finished.
     pub fn start_iteration(&mut self) -> Result<Vec<T::State>, MctsError>{
-        if self.state != MctsState::Usable {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
-
-        self.state = MctsState::Locked;
 
         let mut game_states: Vec<T::State> = Vec::with_capacity(self.get_count());
 
@@ -320,7 +326,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
             }
         }
 
-        self.state = MctsState::AwaitingSimulation;
+        self.state.0.store(MctsState::AWAITING_SIMULATION, Ordering::Relaxed);
         Ok(game_states)
     }
 
@@ -342,15 +348,15 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     ///                                  evaluations does not match the number of active instances
     ///                                  that were awaiting simulation.
     pub fn apply_simulation(&mut self, mut evaluations : Vec<(f64, [f64; N])>) -> Result<(), MctsError>{
-        if self.state != MctsState::AwaitingSimulation {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::AWAITING_SIMULATION, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
 
         if evaluations.len() != self.get_count() {
+            self.state.0.store(MctsState::AWAITING_SIMULATION, Ordering::Relaxed);
             return Err(MctsError::InvalidEvaluationCount(self.get_count(), evaluations.len()));
         }
-
-        self.state = MctsState::Locked;
 
         for opt in &mut self.instances.iter_mut().rev(){
             if let Some((mcts, history)) = opt{
@@ -367,7 +373,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
             }
         }
 
-        self.state = MctsState::Usable;
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(())
     }
 
@@ -382,11 +388,10 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
     /// for completed games. Returns an empty `Vec` if no instances have finished.
     /// `Err(MctsError::InvalidState(_))` if the batch processor is not in the `Usable` state.
     pub fn next(&mut self) -> Result<Vec<History<T, N>>, MctsError>{
-        if self.state != MctsState::Usable {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
-        
-        self.state = MctsState::Locked;
 
         let mut result = Vec::new();
 
@@ -417,8 +422,8 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
                 }
             }
         }
-        self.state = MctsState::Usable;
 
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(result)
     }
 }

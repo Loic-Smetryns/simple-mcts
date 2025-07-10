@@ -6,7 +6,7 @@
 //! for various board games.
 
 use core::f64;
-use std::{cell::RefCell, rc::Rc};
+use std::sync::{atomic::{AtomicU8, Ordering}, Arc, Mutex};
 
 use crate::{Game, GameEvaluator, Node, NodeRef};
 
@@ -133,18 +133,19 @@ type MctsNodeRef<const N: usize> = NodeRef<MctsNodeData<N>, N>;
 
 /// Represents the current state of an MCTS (Monte Carlo Tree Search) instance,
 /// controlling the flow of operations and preventing invalid sequential calls.
-#[derive(Clone, Debug, PartialEq)]
-pub enum MctsState{
+#[derive(Debug)]
+pub struct MctsState(pub AtomicU8);
+impl MctsState{
     /// The MCTS instance is in a normal, ready-to-use state.
     /// All normal operations can be performed.
-    Usable,
+    pub const USABLE: u8 = 0;
     /// The MCTS instance is awaiting the result of an external simulation.
     /// Only `apply_simulation` can be called in this state.
-    AwaitingSimulation,
+    pub const AWAITING_SIMULATION: u8 = 1;
     /// The MCTS instance is temporarily locked during an internal operation
     /// (e.g., selection, expansion, backpropagation).
     /// No public methods should be called while in this state.
-    Locked
+    pub const LOCKED: u8 = 2;
 }
 
 /// Represents possible errors that can occur during MCTS (Monte Carlo Tree Search) operations.
@@ -153,7 +154,7 @@ pub enum MctsError{
     /// Indicates that an MCTS operation was attempted when the instance was not in the
     /// required state (e.g., calling `apply_simulation` without `start_iteration`,
     /// or calling any method while in `Locked` state).
-    InvalidState(MctsState),
+    InvalidState(u8),
     /// Occurs when the number of provided evaluations does not match the expected count
     /// (e.g., in `MctsBatch::apply_simulation`).
     /// Contains (expected_count, received_count).
@@ -339,7 +340,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
             game: game, 
             root: None, 
             coef: config.exploration_coef, 
-            state: MctsState::Usable, 
+            state: MctsState(AtomicU8::new(MctsState::USABLE)), 
             latent: None, 
             selection_function: config.selection_function
         }
@@ -363,8 +364,8 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     /// # Returns
     /// A clone of the current `MctsState`.
     #[inline]
-    pub fn get_state(&self) -> MctsState{
-        self.state.clone()
+    pub fn get_state(&self) -> u8{
+        self.state.0.load(Ordering::SeqCst)
     }
 
     /// Calculates the UCB1 score for a child node during the selection phase.
@@ -384,7 +385,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     #[inline]
     fn get_selection_score(&self, node: &MctsNode<N>, index: usize) -> f64{
         if let Some(child) = node.get_child(index){
-            let node_child = &*child.borrow();
+            let node_child = &*child.lock().unwrap();
 
             if node_child.get().is_finish() { 
                 -INFINITY 
@@ -416,21 +417,21 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
         let mut game: T = self.game.clone();
 
         let mut node = match &self.root {
-            Some(root) => Rc::clone(root),
+            Some(root) => Arc::clone(root),
             None => return (None, 0, game)
         };
 
         loop {
-            let scores : [f64; N] = std::array::from_fn(|index| self.get_selection_score(&node.borrow(), index));
+            let scores : [f64; N] = std::array::from_fn(|index| self.get_selection_score(&node.lock().unwrap(), index));
 
             let index = scores.iter().enumerate().max_by(|a, b| (a.1).total_cmp(b.1)).unwrap().0;
             game.play(index);
 
-            if node.borrow().get_child(index).is_none() {
+            if node.lock().unwrap().get_child(index).is_none() {
                 return (Some(node), index, game);
             }
 
-            let next = node.borrow().get_child(index).unwrap();
+            let next = node.lock().unwrap().get_child(index).unwrap();
             node = next;
         }
     }
@@ -449,11 +450,11 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
             Node::add_child(&node, index, MctsNodeData::new())
         }
         else{
-            let node_ref = Rc::new(RefCell::new(
+            let node_ref = Arc::new(Mutex::new(
                 MctsNode::new(None, MctsNodeData::new())
             ));
 
-            self.root = Some(Rc::clone(&node_ref));
+            self.root = Some(Arc::clone(&node_ref));
             node_ref
         }
     }
@@ -513,13 +514,13 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     /// - `node_ref`: The node to start backpropagation from
     #[inline]
     fn backpropagation(&mut self, node_ref: &MctsNodeRef<N>){
-        let mut current_ref_opt: Option<Rc<RefCell<Node<MctsNodeData<N>, N>>>>;
+        let mut current_ref_opt: Option<Arc<Mutex<Node<MctsNodeData<N>, N>>>>;
 
         let mut score: f64;
         let mut finish: bool;
 
         {
-            let node = &*node_ref.borrow();
+            let node = &*node_ref.lock().unwrap();
             score = node.get().get_value();
             finish = node.get().is_finish();
             current_ref_opt = node.get_parent();
@@ -528,7 +529,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
         while let Some(current_ref) = current_ref_opt {
             score = -score;
             
-            let current = &mut *current_ref.borrow_mut();
+            let current = &mut *current_ref.lock().unwrap();
 
             if !finish{
                 current.get_mut().add_score(score);
@@ -544,7 +545,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
                     let current_is_finish = (0..N).all(|index|{
                         !current.get().get_mask(index) || {
                             if let Some(child_ref) = current.get_child(index){
-                                let child = &*child_ref.borrow();
+                                let child = &*child_ref.lock().unwrap();
 
                                 let value = child.get().get_value();
                                 if value > max_score {
@@ -584,25 +585,24 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     /// `Err(MctsError::InvalidState(_))` if the MCTS instance is not in the `Usable` state.
     #[inline]
     pub fn iterate(&mut self, evaluator: &dyn GameEvaluator<T, N>) -> Result<(), MctsError> {
-        if self.state != MctsState::Usable{
-            return Err(MctsError::InvalidState(self.state.clone()))
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
 
-        self.state = MctsState::Locked;
-
         if let Some(root) = self.root.as_ref(){
-            if root.borrow().get().is_finish(){
-                self.state = MctsState::Usable;
+            if root.lock().unwrap().get().is_finish(){
+                self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
                 return Ok(());
             }
         }
 
         let (node, index, game) = self.selection();
         let child_ref = self.expansion(&node, index);
-        self.simulation(&mut *child_ref.borrow_mut(), &game, evaluator);
+        self.simulation(&mut *child_ref.lock().unwrap(), &game, evaluator);
         self.backpropagation(&child_ref);
 
-        self.state = MctsState::Usable;
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(())
     }
 
@@ -617,14 +617,14 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     /// `Err(MctsError::SearchAlreadyOver)` if the root node already represents a finished game.
     #[inline]
     pub fn start_iteration(&mut self) -> Result<T::State, MctsError>{
-        if self.state != MctsState::Usable{
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
 
-        self.state = MctsState::Locked;
-
         if let Some(root) = self.root.as_ref(){
-            if root.borrow().get().is_finish(){
+            if root.lock().unwrap().get().is_finish(){
+                self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
                 return Err(MctsError::SearchAlreadyOver)
             }
         }
@@ -635,7 +635,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
         let game_state = game.get_state();
 
         self.latent = Some((game, child_ref));
-        self.state = MctsState::AwaitingSimulation;
+        self.state.0.store(MctsState::AWAITING_SIMULATION, Ordering::Relaxed);
 
         Ok(game_state)
     }
@@ -654,17 +654,17 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     /// `Err(MctsError::InvalidState(_))` if the MCTS instance is not in the `AwaitingSimulation` state.
     #[inline]
     pub fn apply_simulation(&mut self, evaluation : (f64, [f64; N])) -> Result<(), MctsError>{
-        if self.state != MctsState::AwaitingSimulation || self.latent.is_none() {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::AWAITING_SIMULATION, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
-        self.state = MctsState::Locked;
 
         let (game, child_ref) = self.latent.take().unwrap();
 
-        self.simulation_from_data(&mut *child_ref.borrow_mut(), &game, evaluation);
+        self.simulation_from_data(&mut *child_ref.lock().unwrap(), &game, evaluation);
         self.backpropagation(&child_ref);
 
-        self.state = MctsState::Usable;
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(())
     }
 
@@ -676,7 +676,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     #[inline]
     pub fn is_finish(&self) -> bool{
         if let Some(root) = &self.root{
-            root.borrow().get().is_finish()
+            root.lock().unwrap().get().is_finish()
         }
         else{ false }
     }
@@ -685,7 +685,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     #[inline]
     pub fn get_score(&self) -> f64{
         if let Some(root) = &self.root {
-            -root.borrow().get().get_value()
+            -root.lock().unwrap().get().get_value()
         }
         else{ Self::EQUALITY_SCORE }
     }
@@ -709,7 +709,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
         // 0 -> score = -inf
         let scores: [f64; N] = std::array::from_fn(|index|{
             if let Some(child_ref) = root.get_child(index){
-                let score = child_ref.borrow().get().get_value();
+                let score = child_ref.lock().unwrap().get().get_value();
 
                 if score != 1.{ (score + 1.) / (1. - score) + f64::MIN_POSITIVE } else{ f64::MAX / N as f64 }
             }
@@ -729,7 +729,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     #[inline]
     pub fn get_statistics(&self) -> [f64; N]{
         if let Some(root_ref) = &self.root {
-            Self::statistics_from_root(&*root_ref.borrow())
+            Self::statistics_from_root(&*root_ref.lock().unwrap())
         }
         else{
             [1./N as f64; N]
@@ -749,7 +749,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     #[inline]
     pub fn get_result(&self) -> (f64, [f64; N]){
         if let Some(root_ref) = &self.root {
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
             (-root.get().get_value(), Self::statistics_from_root(root))
         }
         else{
@@ -766,7 +766,7 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     #[inline]
     pub fn count_visit(&self) -> usize{
         if let Some(root_ref) = &self.root{
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
             root.get().get_n()
         }
         else { 0 }
@@ -788,24 +788,24 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
     /// `Err(MctsError::UnexploredAction)` if the action cannot be check because root is null.
     #[inline]
     pub fn play(&mut self, action: usize) -> Result<(), MctsError>{
-        if self.state != MctsState::Usable {
-            return Err(MctsError::InvalidState(self.state.clone()));
+        match self.state.0.compare_exchange(MctsState::USABLE, MctsState::LOCKED, Ordering::SeqCst, Ordering::SeqCst){
+            Ok(_) => {}
+            Err(current_state) => { return Err(MctsError::InvalidState(current_state)); }
         }
 
         if action >= N {
+            self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
             return Err(MctsError::ActionOutOfRange(action, N));
         }
-
-        self.state = MctsState::Locked;
 
         let new_root;
 
         if let Some(root_ref) = &self.root{
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             if let Some(child_ref) = root.get_child(action){
                 {
-                    let child = &mut *child_ref.borrow_mut();
+                    let child = &mut *child_ref.lock().unwrap();
                     child.detach();
                 }
 
@@ -815,17 +815,19 @@ impl<T: Game<N>, const N: usize> Mcts<T, N>{
                 new_root = None;
             }
             else{
+                self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
                 return Err(MctsError::InvalidAction(action));
             }
         }
         else{
+            self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
             return Err(MctsError::UnexploredAction);
         }
 
         self.game.play(action);
         self.root = new_root;
 
-        self.state = MctsState::Usable;
+        self.state.0.store(MctsState::USABLE, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -854,7 +856,7 @@ mod tests {
         mcts.expansion(&None, 0);
 
         let (node, _index, _game)  = mcts.selection();
-        let node = &*node.as_ref().unwrap().borrow();
+        let node = &*node.as_ref().unwrap().lock().unwrap();
 
         assert!(node.is_root());
 
@@ -871,7 +873,7 @@ mod tests {
 
         let (node, index, game) = mcts.selection();
         let child = mcts.expansion(&node, index);
-        let child = &mut *child.borrow_mut();
+        let child = &mut *child.lock().unwrap();
 
         mcts.simulation(child, &game, &evaluator);
 
@@ -897,7 +899,7 @@ mod tests {
 
         {
             let node_ref = mcts.root.as_ref().unwrap();
-            let node = &*node_ref.borrow();
+            let node = &*node_ref.lock().unwrap();
 
             assert!(node.is_root());
             assert!(!node.get().is_finish());
@@ -921,7 +923,7 @@ mod tests {
 
         {
             let root_ref = mcts.root.as_ref().unwrap();
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             assert_eq!(root.get().score, 0.2);
             assert_eq!(root.get().n, 2);
@@ -937,7 +939,7 @@ mod tests {
 
         {
             let root_ref = mcts.root.as_ref().unwrap();
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             assert_eq!(root.get().score, 0.0);
             assert_eq!(root.get().n, 5);
@@ -962,7 +964,7 @@ mod tests {
 
         {
             let root_ref = mcts.root.as_ref().unwrap();
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             assert_eq!(root.get().score, 0.0);
             assert_eq!(root.get().n, 7);
@@ -987,7 +989,7 @@ mod tests {
 
         {
             let root_ref = mcts.root.as_ref().unwrap();
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             assert!(root.get().is_finish());
             assert_eq!(root.get().get_value(), 1.0);
@@ -1013,7 +1015,7 @@ mod tests {
 
         {
             let root_ref = mcts.root.as_ref().unwrap();
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             assert!(root.get().is_finish());
             assert_eq!(root.get().get_value(), -1.0);
@@ -1039,7 +1041,7 @@ mod tests {
 
         {
             let root_ref = mcts.root.as_ref().unwrap();
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             assert!(root.get().is_finish());
             assert_eq!(root.get().get_value(), -1.0);
@@ -1064,7 +1066,7 @@ mod tests {
 
         {
             let root_ref = mcts.root.as_ref().unwrap();
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             assert!(root.get().is_finish());
             assert_eq!(root.get().get_value(), -1.0);
@@ -1090,7 +1092,7 @@ mod tests {
 
         {
             let root_ref = mcts.root.as_ref().unwrap();
-            let root = &*root_ref.borrow();
+            let root = &*root_ref.lock().unwrap();
 
             assert!(root.get().is_finish());
             assert_eq!(root.get().get_value(), -1.0);
@@ -1119,7 +1121,7 @@ mod tests {
         mcts.play(3)?;
         assert_eq!(mcts.count_visit(), 2);
 
-        assert!(mcts.root.unwrap().borrow().is_root());
+        assert!(mcts.root.unwrap().lock().unwrap().is_root());
         Ok(())
     }
 
