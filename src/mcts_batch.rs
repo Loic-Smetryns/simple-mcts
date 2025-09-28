@@ -359,17 +359,9 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
         }
 
         for opt in &mut self.instances.iter_mut().rev(){
-            if let Some((mcts, history)) = opt{
+            if let Some((mcts, _history)) = opt{
                 if mcts.get_game().is_finish() { continue; }
-                let game = mcts.get_game().clone();
-
                 mcts.apply_simulation(evaluations.pop().unwrap())?;
-                let (value, policy) = mcts.get_result();
-
-                let action = utils::sample(&policy, &mut self.rand);
-                mcts.play(action)?;
-
-                history.push((game, value, policy));
             }
         }
 
