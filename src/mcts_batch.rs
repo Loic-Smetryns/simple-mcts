@@ -291,7 +291,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
 
         for opt in &mut self.instances{
             if let Some((mcts, _history)) = opt{
-                if !mcts.get_game().is_finish() {
+                if !mcts.get_game().is_finish() && !mcts.is_finish() {
                     mcts.iterate(evaluator)?;
                 }
             }
@@ -320,7 +320,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
 
         for opt in &mut self.instances{
             if let Some((mcts, _history)) = opt{
-                if !mcts.get_game().is_finish() {
+                if !mcts.get_game().is_finish() && !mcts.is_finish(){
                     game_states.push(mcts.start_iteration()?);
                 }
             }
