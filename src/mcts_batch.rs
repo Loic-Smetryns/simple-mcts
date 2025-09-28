@@ -410,7 +410,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
                     result.push(opt.take().unwrap().1);
                     self.count -= 1;
                 }
-                else{
+                else if mcts.count_visit() > 0{
                     let (mcts, history) = opt.as_mut().unwrap();
                     
                     let (value, policy) = mcts.get_result();
