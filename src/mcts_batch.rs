@@ -389,7 +389,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
 
         for opt in &mut self.instances{
             if let Some((mcts, _history)) = &opt{
-                if mcts.get_game().is_finish(){
+                if mcts.get_game().is_finish() || mcts.is_finish(){
                     {
                         let (mcts, history) = opt.as_mut().unwrap();
 
