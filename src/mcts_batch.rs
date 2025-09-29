@@ -291,7 +291,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
 
         for opt in &mut self.instances{
             if let Some((mcts, _history)) = opt{
-                if !mcts.get_game().is_finish() {
+                if !mcts.get_game().is_finish() && !mcts.is_finish() {
                     mcts.iterate(evaluator)?;
                 }
             }
@@ -320,7 +320,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
 
         for opt in &mut self.instances{
             if let Some((mcts, _history)) = opt{
-                if !mcts.get_game().is_finish() {
+                if !mcts.get_game().is_finish() && !mcts.is_finish(){
                     game_states.push(mcts.start_iteration()?);
                 }
             }
@@ -359,17 +359,9 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
         }
 
         for opt in &mut self.instances.iter_mut().rev(){
-            if let Some((mcts, history)) = opt{
-                if mcts.get_game().is_finish() { continue; }
-                let game = mcts.get_game().clone();
-
+            if let Some((mcts, _history)) = opt{
+                if mcts.get_game().is_finish() || mcts.is_finish() { continue; }
                 mcts.apply_simulation(evaluations.pop().unwrap())?;
-                let (value, policy) = mcts.get_result();
-
-                let action = utils::sample(&policy, &mut self.rand);
-                mcts.play(action)?;
-
-                history.push((game, value, policy));
             }
         }
 
@@ -410,7 +402,7 @@ impl<T: Game<N>, const N: usize> MctsBatch<T, N>{
                     result.push(opt.take().unwrap().1);
                     self.count -= 1;
                 }
-                else{
+                else if mcts.count_visit() > 0{
                     let (mcts, history) = opt.as_mut().unwrap();
                     
                     let (value, policy) = mcts.get_result();
