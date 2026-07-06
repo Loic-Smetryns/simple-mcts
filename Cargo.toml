@@ -8,3 +8,8 @@ repository = "https://github.com/Loic-Smetryns/simple-mcts"
 
 [dev-dependencies]
 rand = "0.10.1"
+criterion = "0.8.2"
+
+[[bench]]
+name = "mcts_bench"
+harness = false
